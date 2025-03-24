@@ -1,8 +1,6 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <ncurses.h>
-#include <unistd.h>
-#include <pthread.h>
 #include <time.h>
 
 #define WIDTH  40
