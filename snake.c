@@ -1,50 +1,160 @@
-#include <ncurses.h>
+#include "snake.h"
 #include <stdlib.h>
-#include <time.h>
-#include <pthread.h>
-#include <unistd.h>
+#include <stdio.h>
 #include <string.h>
+#include <SDL2/SDL_image.h>
+#include <time.h>
 
-#define WIDTH 40
-#define HEIGHT 20
-#define MAX_LENGTH 100
-#define MAX_OBSTACLES 20
-#define MAX_FRUITS 5
-
-typedef enum { STOP = 0, LEFT, RIGHT, UP, DOWN } Direction;
-
-typedef struct {
-    int x[MAX_LENGTH];
-    int y[MAX_LENGTH];
-    int length;
-    int lives;
-    int score;
-    Direction dir;
-    int speed_boost;
-    time_t invincible_until;  
-} Snake;
-
-typedef struct {
-    int x, y;
-    int type; 
-    int timer;
-} Fruit;
-
-typedef struct {
-    int x, y;
-    int active;
-} Obstacle;
-
-static Snake snake1, snake2;
-static Fruit fruits[MAX_FRUITS];
-static Obstacle obstacles[MAX_OBSTACLES];
-static int num_fruits = 0;
-static int num_obstacles = 0;
-static int game_over = 0;
-static int multiplayer = 0;
-static int speed_delay = 200000;
+// Variabile globale și efecte temporare
+Snake snake1, snake2;
+Fruit fruits[MAX_FRUITS];
+Obstacle obstacles[MAX_OBSTACLES];
+int num_fruits = 0, num_obstacles = 0;
+int game_over = 0, multiplayer = 0, speed_delay = 200000;
 static int fruits_eaten = 0;
-static pthread_mutex_t input_mutex;
+static time_t watermelon_effect_until = 0;
+
+SDL_Texture *tex_snake_head = NULL;
+SDL_Texture *tex_snake_body = NULL;
+SDL_Texture *tex_apple = NULL;
+SDL_Texture *tex_pear = NULL;
+SDL_Texture *tex_cherry = NULL;
+SDL_Texture *tex_watermelon = NULL;
+SDL_Texture *tex_blue_apricot = NULL;
+SDL_Texture *tex_cactus = NULL;
+SDL_Texture *info_background = NULL;
+TTF_Font *game_font = NULL;
+
+SDL_Texture* loadImage(SDL_Renderer *renderer, const char *path) {
+    SDL_Surface *surf = IMG_Load(path);
+    if (!surf) {
+        printf("IMG_Load failed: %s\n", IMG_GetError());
+        return NULL;
+    }
+    SDL_Texture *tex = SDL_CreateTextureFromSurface(renderer, surf);
+    SDL_FreeSurface(surf);
+    return tex;
+}
+
+SDL_Texture* renderText(SDL_Renderer *renderer, const char *text, SDL_Color color) {
+    SDL_Surface *surf = TTF_RenderText_Blended(game_font, text, color);
+    if (!surf) return NULL;
+    SDL_Texture *tex = SDL_CreateTextureFromSurface(renderer, surf);
+    SDL_FreeSurface(surf);
+    return tex;
+}
+
+int loadTextures(SDL_Renderer *renderer) {
+    tex_snake_head = loadImage(renderer, "assets/snake_head.png");
+    tex_snake_body = loadImage(renderer, "assets/snake_body.png");
+    tex_apple      = loadImage(renderer, "assets/fruit_apple.png");
+    tex_pear       = loadImage(renderer, "assets/fruit_pear.png");
+    tex_cherry     = loadImage(renderer, "assets/fruit_cherry.png");
+    tex_watermelon = loadImage(renderer, "assets/watermelon.png");
+    tex_blue_apricot = loadImage(renderer, "assets/fruit.png");
+    tex_cactus     = loadImage(renderer, "assets/obstacle_cactus.png");
+    info_background= loadImage(renderer, "assets/fruit_info.png");
+
+    game_font = TTF_OpenFont("assets/OpenSans-Regular.ttf", 18);
+    if (!game_font) {
+        printf("Font load failed: %s\n", TTF_GetError());
+        return 0;
+    }
+
+    return tex_snake_head && tex_snake_body && tex_apple &&
+           tex_pear && tex_cherry && tex_cactus && info_background &&
+           tex_watermelon && tex_blue_apricot;
+}
+
+void unloadTextures() {
+    SDL_DestroyTexture(tex_snake_head);
+    SDL_DestroyTexture(tex_snake_body);
+    SDL_DestroyTexture(tex_apple);
+    SDL_DestroyTexture(tex_pear);
+    SDL_DestroyTexture(tex_cherry);
+    SDL_DestroyTexture(tex_watermelon);
+    SDL_DestroyTexture(tex_blue_apricot);
+    SDL_DestroyTexture(tex_cactus);
+    SDL_DestroyTexture(info_background);
+
+    if (game_font) TTF_CloseFont(game_font);
+    TTF_Quit();
+}
+
+void drawTexture(SDL_Renderer *renderer, SDL_Texture *tex, int grid_x, int grid_y) {
+    SDL_Rect dest = { grid_x * SCALE, grid_y * SCALE, SCALE, SCALE };
+    SDL_RenderCopy(renderer, tex, NULL, &dest);
+}
+
+void drawGame(SDL_Renderer *renderer, SDL_Window *window) {
+    SDL_SetRenderDrawColor(renderer, 30, 30, 30, 255);
+    SDL_RenderClear(renderer);
+
+    
+    SDL_SetRenderDrawColor(renderer, 80, 80, 80, 255);
+    SDL_Rect b;
+    b = (SDL_Rect){0, 0, WIDTH * SCALE, SCALE}; SDL_RenderFillRect(renderer, &b); // top
+    b.y = (HEIGHT - 1) * SCALE; SDL_RenderFillRect(renderer, &b); // bottom
+    b = (SDL_Rect){0, 0, SCALE, HEIGHT * SCALE}; SDL_RenderFillRect(renderer, &b); // left
+    b.x = (WIDTH - 1) * SCALE; SDL_RenderFillRect(renderer, &b); // right
+
+    for (int i = 0; i < num_obstacles; i++)
+        if (obstacles[i].active)
+            drawTexture(renderer, tex_cactus, obstacles[i].x, obstacles[i].y);
+
+    for (int i = 0; i < num_fruits; i++) {
+        SDL_Texture *fruitTex = tex_apple;
+        if (fruits[i].type == 1) fruitTex = tex_pear;
+        else if (fruits[i].type == 2 || fruits[i].type == 5) fruitTex = tex_cherry;
+        else if (fruits[i].type == 3) fruitTex = tex_watermelon;
+        else if (fruits[i].type == 4) fruitTex = tex_blue_apricot;
+        drawTexture(renderer, fruitTex, fruits[i].x, fruits[i].y);
+    }
+
+    for (int i = 0; i < snake1.length; i++)
+        drawTexture(renderer, i == 0 ? tex_snake_head : tex_snake_body, snake1.x[i], snake1.y[i]);
+
+    if (multiplayer)
+        for (int i = 0; i < snake2.length; i++)
+            drawTexture(renderer, i == 0 ? tex_snake_head : tex_snake_body, snake2.x[i], snake2.y[i]);
+
+    SDL_RenderPresent(renderer);
+}
+
+void showInfoMenu(SDL_Renderer *renderer) {
+    int running = 1;
+    SDL_Event e;
+
+    while (running) {
+        while (SDL_PollEvent(&e)) {
+            if (e.type == SDL_QUIT) {
+                game_over = 1;
+                return;
+            }
+            if (e.type == SDL_KEYDOWN && e.key.keysym.sym == SDLK_ESCAPE) {
+                running = 0;
+            }
+        }
+
+        SDL_SetRenderDrawColor(renderer, 240, 240, 240, 255);
+        SDL_RenderClear(renderer);
+        SDL_Rect dest = { (WIDTH * SCALE - 480) / 2, (HEIGHT * SCALE - 300) / 2, 480, 300 };
+        SDL_RenderCopy(renderer, info_background, NULL, &dest);
+        SDL_RenderPresent(renderer);
+    }
+}
+
+void initGame() {
+    srand(time(NULL));
+    resetSnake(&snake1, WIDTH / 4, HEIGHT / 2);
+    if (multiplayer)
+        resetSnake(&snake2, 3 * WIDTH / 4, HEIGHT / 2);
+
+    num_fruits = 0;
+    num_obstacles = 0;
+    spawnFruit(3);
+    for (int i = 0; i < 5; i++) spawnObstacle();
+}
 
 void resetSnake(Snake *snake, int startX, int startY) {
     snake->length = 5;
@@ -60,7 +170,7 @@ void resetSnake(Snake *snake, int startX, int startY) {
 }
 
 void spawnFruit(int count) {
-    while (num_fruits < 3) {
+    while (num_fruits < 3 && count > 0) {
         fruits[num_fruits].x = rand() % (WIDTH - 2) + 1;
         fruits[num_fruits].y = rand() % (HEIGHT - 2) + 1;
         fruits[num_fruits].type = rand() % 6;
@@ -78,105 +188,29 @@ void spawnObstacle() {
     num_obstacles++;
 }
 
-void initGame() {
-    initscr(); noecho(); curs_set(FALSE); keypad(stdscr, TRUE); timeout(0);
-    srand(time(NULL));
-
-    resetSnake(&snake1, WIDTH / 4, HEIGHT / 2);
-    if (multiplayer) resetSnake(&snake2, 3 * WIDTH / 4, HEIGHT / 2);
-
-    num_fruits = 0;
-    num_obstacles = 0;
-    spawnFruit(3);
-    for (int i = 0; i < 5; i++) spawnObstacle();
-}
-
-
-void drawGame() {
-    clear();
-
-    
-    mvprintw(0, 0, "┌");
-    mvprintw(0, WIDTH, "┐");
-    mvprintw(HEIGHT, 0, "└");
-    mvprintw(HEIGHT, WIDTH, "┘");
-
-    for (int i = 1; i < WIDTH; i++) {
-        mvprintw(0, i, "-");
-        mvprintw(HEIGHT, i, "-");
-    }
-
-    for (int i = 1; i < HEIGHT; i++) {
-        mvprintw(i, 0, "|");
-        mvprintw(i, WIDTH, "|");
-    }
-
-
-    for (int i = 0; i < num_obstacles; i++)
-        if (obstacles[i].active)
-            mvprintw(obstacles[i].y, obstacles[i].x, "X");
-
- 
-    for (int i = 0; i < num_fruits; i++) {
-        char c = 'F';  
-        switch (fruits[i].type) {
-            case 1: c = 'R'; break;
-            case 2: c = 'B'; break;
-            case 3: c = 'G'; break;
-            case 4: c = 'N'; break;
-            case 5: c = 'Y'; break;
-        }
-        mvprintw(fruits[i].y, fruits[i].x, "%c", c);
-    }
-
-   
-    for (int i = 0; i < snake1.length; i++) {
-        if (i == 0)
-            mvprintw(snake1.y[i], snake1.x[i], "@");  
-        else
-            mvprintw(snake1.y[i], snake1.x[i], "0");  
-    }
-
-   
-    if (multiplayer) {
-        for (int i = 0; i < snake2.length; i++) {
-            if (i == 0)
-                mvprintw(snake2.y[i], snake2.x[i], "#");
-            else
-                mvprintw(snake2.y[i], snake2.x[i], "+");
-        }
-    }
-
-
-    mvprintw(HEIGHT + 2, 0, "Player 1 Score: %d Lives: %d", snake1.score, snake1.lives);
-    if (multiplayer)
-        mvprintw(HEIGHT + 3, 0, "Player 2 Score: %d Lives: %d", snake2.score, snake2.lives);
-
-    refresh();
-}
 void moveSnake(Snake *snake) {
     int next_x = snake->x[0];
     int next_y = snake->y[0];
+    int is_invincible = time(NULL) < snake->invincible_until;
+
     switch (snake->dir) {
         case LEFT:  next_x--; break;
         case RIGHT: next_x++; break;
         case UP:    next_y--; break;
         case DOWN:  next_y++; break;
-        default: break;
+        default: return;
     }
 
-    int is_invincible = time(NULL) < snake->invincible_until;
-
     if (is_invincible) {
-        if (next_x <= 0 || next_x >= WIDTH || next_y <= 0 || next_y >= HEIGHT) {
-            snake->dir = RIGHT;
+        int collision = 0;
+        if (next_x <= 0 || next_x >= WIDTH || next_y <= 0 || next_y >= HEIGHT)
+            collision = 1;
+        for (int i = 0; i < num_obstacles; i++)
+            if (obstacles[i].active && next_x == obstacles[i].x && next_y == obstacles[i].y)
+                collision = 1;
+        if (collision) {
+            snake->dir = LEFT;
             return;
-        }
-        for (int i = 0; i < num_obstacles; i++) {
-            if (obstacles[i].active && next_x == obstacles[i].x && next_y == obstacles[i].y) {
-                snake->dir = RIGHT;
-                return;
-            }
         }
     }
 
@@ -203,13 +237,42 @@ int checkCollision(Snake *snake) {
 
 void applyFruitEffect(Snake *snake, Fruit *fruit) {
     switch (fruit->type) {
-        case 0: snake->score++; snake->length++; break;
-        case 1: snake->score += 10; snake->length += 4; break;
-        case 2: snake->speed_boost = 40; break;
-        case 3: snake->invincible_until = time(NULL) + 10; break;
-        case 4: if (multiplayer) snake2.speed_boost = -10; break;
-        case 5: snake->score -= 2; break;
+        case 0: // Apple
+            snake->score++;
+            snake->length++;
+            break;
+        case 1: // Pear
+            snake->score += 10;
+            snake->length += 4;
+            break;
+        case 2: // Cherry - invincibility
+            snake->invincible_until = time(NULL) + 10;
+            break;
+        case 3: // Watermelon - speed x5 + double obstacles
+            snake->length += 2;
+            speed_delay = speed_delay / 3;
+            watermelon_effect_until = time(NULL) + 10;
+            for (int i = 0; i < num_obstacles && num_obstacles < MAX_OBSTACLES; i++) {
+                if (obstacles[i].active) {
+                    obstacles[num_obstacles].x = obstacles[i].x + 1;
+                    obstacles[num_obstacles].y = obstacles[i].y + 1;
+                    obstacles[num_obstacles].active = 1;
+                    num_obstacles++;
+                }
+            }
+            break;
+        case 4: //  apricot - slows and repositions
+            speed_delay *= 2;
+            for (int i = 0; i < num_obstacles; i++) {
+                obstacles[i].x = rand() % (WIDTH - 2) + 1;
+                obstacles[i].y = rand() % (HEIGHT - 2) + 1;
+            }
+            break;
+        case 5: 
+            snake->score -= 2;
+            break;
     }
+
     fruits_eaten++;
     if (fruits_eaten == 3) {
         for (int i = 0; i < num_obstacles; i++) obstacles[i].active = 0;
@@ -222,13 +285,19 @@ void updateGame() {
     moveSnake(&snake1);
     if (multiplayer) moveSnake(&snake2);
 
+    // expiră efectul pepene?
+    if (time(NULL) > watermelon_effect_until && watermelon_effect_until != 0) {
+        speed_delay = 180000;
+        watermelon_effect_until = 0;
+    }
+
     if (time(NULL) >= snake1.invincible_until && checkCollision(&snake1)) {
         snake1.lives--;
-        resetSnake(&snake1, WIDTH/4, HEIGHT/2);
+        resetSnake(&snake1, WIDTH / 4, HEIGHT / 2);
     }
     if (multiplayer && time(NULL) >= snake2.invincible_until && checkCollision(&snake2)) {
         snake2.lives--;
-        resetSnake(&snake2, 3*WIDTH/4, HEIGHT/2);
+        resetSnake(&snake2, 3 * WIDTH / 4, HEIGHT / 2);
     }
 
     for (int i = 0; i < num_fruits;) {
@@ -247,82 +316,141 @@ void updateGame() {
             i++;
         }
     }
-    if(num_fruits==1)
-    spawnFruit(2);
-}
 
-void *inputHandler(void *arg) {
-    int ch;
-    while (!game_over) {
-        pthread_mutex_lock(&input_mutex);
-        ch = getch();
-        switch (ch) {
-            case 'w': if (snake1.dir != DOWN) snake1.dir = UP; break;
-            case 's': if (snake1.dir != UP) snake1.dir = DOWN; break;
-            case 'a': if (snake1.dir != RIGHT) snake1.dir = LEFT; break;
-            case 'd': if (snake1.dir != LEFT) snake1.dir = RIGHT; break;
-            case KEY_UP: if (snake2.dir != DOWN) snake2.dir = UP; break;
-            case KEY_DOWN: if (snake2.dir != UP) snake2.dir = DOWN; break;
-            case KEY_LEFT: if (snake2.dir != RIGHT) snake2.dir = LEFT; break;
-            case KEY_RIGHT: if (snake2.dir != LEFT) snake2.dir = RIGHT; break;
-            case 'q': game_over = 1; break;
-        }
-        pthread_mutex_unlock(&input_mutex);
-        usleep(10000);
-    }
-    return NULL;
+    if (num_fruits <= 1)
+        spawnFruit(2);
 }
 
 void saveScore(const char *winner) {
     FILE *f = fopen("leaderboard.txt", "a");
     if (f) {
-        fprintf(f, "Winner: %s, Score: %d\n", winner, (strcmp(winner, "Player 1") == 0) ? snake1.score : snake2.score);
+        fprintf(f, "Winner: %s, Score: %d\n", winner,
+                (strcmp(winner, "Player 1") == 0) ? snake1.score : snake2.score);
         fclose(f);
     }
 }
 
-void showMenu() {
-    int choice;
-    printf("1. Singleplayer\n2. Multiplayer\n3. Exit\nChoice: ");
-    scanf("%d", &choice);
-    if (choice == 1) multiplayer = 0;
-    else if (choice == 2) multiplayer = 1;
-    else exit(0);
+void showLeaderboard(SDL_Renderer *renderer) {
+    FILE *f = fopen("leaderboard.txt", "r");
+    if (!f) return;
 
-    printf("Select speed:\n1. Slow\n2. Normal\n3. Fast\nChoice: ");
-    scanf("%d", &choice);
-    if (choice == 1) speed_delay = 300000;
-    if (choice == 2) speed_delay = 200000;
-    if (choice == 3) speed_delay = 100000;
+    SDL_Event e;
+    SDL_SetRenderDrawColor(renderer, 255, 255, 255, 255);
+    SDL_RenderClear(renderer);
+
+    char line[256];
+    int y = 30;
+    SDL_Color black = {0, 0, 0};
+
+    while (fgets(line, sizeof(line), f) && y < HEIGHT * SCALE - 40) {
+        SDL_Texture *text = renderText(renderer, line, black);
+        if (text) {
+            SDL_Rect dest = {30, y, 0, 0};
+            SDL_QueryTexture(text, NULL, NULL, &dest.w, &dest.h);
+            SDL_RenderCopy(renderer, text, NULL, &dest);
+            SDL_DestroyTexture(text);
+            y += dest.h + 5;
+        }
+    }
+
+    fclose(f);
+    SDL_RenderPresent(renderer);
+
+    while (SDL_WaitEvent(&e)) {
+        if (e.type == SDL_QUIT) {
+            game_over = 1;
+            return;
+        }
+        if (e.type == SDL_KEYDOWN && e.key.keysym.sym == SDLK_RETURN)
+            break;
+    }
 }
 
-int main() {
-    pthread_t input_thread;
-    pthread_mutex_init(&input_mutex, NULL);
+int showMainMenu(SDL_Renderer *renderer) {
+    const char *options[] = {"Singleplayer", "Multiplayer", "Exit"};
+    int selected = 0;
+    SDL_Event e;
+    SDL_Color white = {255, 255, 255}, black = {0, 0, 0};
 
-    showMenu();
-    initGame();
-    pthread_create(&input_thread, NULL, inputHandler, NULL);
+    while (1) {
+        SDL_SetRenderDrawColor(renderer, 30, 30, 30, 255);
+        SDL_RenderClear(renderer);
 
-    while (!game_over) {
-        drawGame();
-        updateGame();
-        if (snake1.lives <= 0 || (multiplayer && snake2.lives <= 0))
-            game_over = 1;
-        usleep(speed_delay);
+        for (int i = 0; i < 3; i++) {
+            SDL_Color color = (i == selected) ? white : black;
+            SDL_Texture *text = renderText(renderer, options[i], color);
+            SDL_Rect dest = {WIDTH * SCALE / 2 - 100, 100 + i * 60, 0, 0};
+            SDL_QueryTexture(text, NULL, NULL, &dest.w, &dest.h);
+            SDL_RenderCopy(renderer, text, NULL, &dest);
+            SDL_DestroyTexture(text);
+        }
+
+        SDL_RenderPresent(renderer);
+
+        while (SDL_PollEvent(&e)) {
+            if (e.type == SDL_QUIT) {
+                game_over = 1;
+                exit(0);
+            }
+            if (e.type == SDL_KEYDOWN) {
+                switch (e.key.keysym.sym) {
+                    case SDLK_UP: selected = (selected + 2) % 3; break;
+                    case SDLK_DOWN: selected = (selected + 1) % 3; break;
+                    case SDLK_RETURN:
+                        if (selected == 0) multiplayer = 0;
+                        else if (selected == 1) multiplayer = 1;
+                        else exit(0);
+
+                        // Selectare viteză implicită
+                        speed_delay = 180000;
+                        return 0;
+                }
+            }
+        }
+    }
+}
+
+int showPauseMenu(SDL_Renderer *renderer) {
+    const char *options[] = {"Resume", "Exit to Main Menu", "Info"};
+    int current = 0;
+    int running = 1;
+    SDL_Event e;
+    SDL_Color white = {255, 255, 255}, black = {0, 0, 0};
+
+    while (running) {
+        SDL_SetRenderDrawColor(renderer, 200, 200, 200, 255);
+        SDL_RenderClear(renderer);
+
+        for (int i = 0; i < 3; i++) {
+            SDL_Color color = (i == current) ? black : white;
+            SDL_Texture *text = renderText(renderer, options[i], color);
+            SDL_Rect dest = {WIDTH * SCALE / 2 - 100, 100 + i * 50, 0, 0};
+            SDL_QueryTexture(text, NULL, NULL, &dest.w, &dest.h);
+            SDL_RenderCopy(renderer, text, NULL, &dest);
+            SDL_DestroyTexture(text);
+        }
+
+        SDL_RenderPresent(renderer);
+
+        while (SDL_WaitEvent(&e)) {
+            if (e.type == SDL_QUIT) {
+                game_over = 1;
+                return -1;
+            }
+            if (e.type == SDL_KEYDOWN) {
+                switch (e.key.keysym.sym) {
+                    case SDLK_UP: current = (current + 2) % 3; break;
+                    case SDLK_DOWN: current = (current + 1) % 3; break;
+                    case SDLK_RETURN:
+                        if (current == 0) return 0; // Resume
+                        if (current == 1) return 1; // Exit
+                        if (current == 2) showInfoMenu(renderer); break;
+                    case SDLK_ESCAPE: return 0;
+                }
+                break;
+            }
+        }
     }
 
-    endwin();
-    pthread_mutex_destroy(&input_mutex);
-
-    printf("\nGame Over!\n");
-    if (!multiplayer || snake1.score > snake2.score) {
-        printf("Winner: Player 1\n");
-        saveScore("Player 1");
-    } else {
-        printf("Winner: Player 2\n");
-        saveScore("Player 2");
-    }
     return 0;
 }
-
